@@ -1,14 +1,18 @@
 package main
 
 import (
+	"database/sql"
 	"flag"
 	"fmt"
 	"io/ioutil"
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"regexp"
 	"text/template"
+
+	_ "github.com/mattn/go-sqlite3"
 )
 
 var (
@@ -22,16 +26,50 @@ type Page struct {
 }
 
 func (p *Page) save() error {
-	filename := "data/" + p.Title + ".txt"
-	return ioutil.WriteFile(filename, p.Body, 0600)
+	db, err := sql.Open("sqlite3", "wiki.db")
+	if err != nil {
+		return err
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+
+	stmt, err := tx.Prepare("INSERT OR REPLACE INTO wiki VALUES((SELECT id FROM wiki WHERE title = ?), ?, ?)")
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	_, err = stmt.Exec(p.Title, p.Title, p.Body)
+	if err != nil {
+		return err
+	}
+
+	tx.Commit()
+	return nil
 }
 
 func loadPage(title string) (*Page, error) {
-	filename := "data/" + title + ".txt"
-	body, err := ioutil.ReadFile(filename)
+	db, err := sql.Open("sqlite3", "wiki.db")
 	if err != nil {
 		return nil, err
 	}
+
+	stmt, err := db.Prepare("SELECT body FROM wiki WHERE title = ?")
+	if err != nil {
+		return nil, err
+	}
+	defer stmt.Close()
+
+	var body []byte
+
+	err = stmt.QueryRow(title).Scan(&body)
+	if err != nil {
+		return nil, err
+	}
+
 	return &Page{Title: title, Body: body}, nil
 }
 
@@ -94,8 +132,25 @@ func makeHandler(fn func(http.ResponseWriter, *http.Request, string)) http.Handl
 	}
 }
 
+func initDb() {
+	if _, err := os.Stat("./wiki.db"); err != nil {
+		log.Println("db does not exists, create one")
+		db, err := sql.Open("sqlite3", "wiki.db")
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer db.Close()
+
+		stmt := `CREATE TABLE wiki(id integer not null primary key, title text, body blob);`
+		if _, err = db.Exec(stmt); err != nil {
+			log.Fatal(err)
+		}
+	}
+}
+
 func main() {
 	flag.Parse()
+	initDb()
 	http.HandleFunc("/view/", makeHandler(viewHandler))
 	http.HandleFunc("/edit/", makeHandler(editHandler))
 	http.HandleFunc("/save/", makeHandler(saveHandler))
